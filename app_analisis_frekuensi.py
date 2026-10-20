@@ -17,6 +17,8 @@ frekuensi_inggris = {
     'Z': 0.07
 }
 
+kata_kunci_inggris = ["THE", "AND", "THAT", "HAVE", "FOR", "NOT", "WITH", "YOU", "THIS", "BUT", "FROM", "THEY", "OUT"]
+
 if "mapping" not in st.session_state:
     st.session_state.mapping = {ch: ch for ch in string.ascii_uppercase}
 
@@ -52,6 +54,27 @@ def substitusi_teks(teks, mapping):
             hasil.append(ch)
     return "".join(hasil)
 
+def auto_solve_cerdas(ciphertext):
+    skor_terbaik = -1
+    map_terbaik = {ch: ch for ch in string.ascii_uppercase}
+    
+    for geser in range(26):
+        test_map = {}
+        for i, ch in enumerate(string.ascii_uppercase):
+            test_map[ch] = string.ascii_uppercase[(i + geser) % 26]
+        
+        test_teks = substitusi_teks(ciphertext, test_map).upper()
+        
+        skor = 0
+        for kata in kata_kunci_inggris:
+            skor += test_teks.count(kata)
+            
+        if skor > skor_terbaik:
+            skor_terbaik = skor
+            map_terbaik = test_map
+            
+    return map_terbaik, skor_terbaik
+
 st.title("Program Kriptanalisis: Analisis Frekuensi")
 st.write("Membongkar cipherteks substitusi dengan memetakan probabilitas kemunculan karakter secara otomatis.")
 st.divider()
@@ -80,10 +103,16 @@ with kolom_kanan:
     with k1:
         urutkan = st.radio("Urutan Grafik:", ["A - Z", "Persentase Tertinggi"], horizontal=True)
     with k2:
-        if st.button("Jalankan Algoritma Pemetaan Otomatis"):
-            urut_cipher = sorted(freq_cipher.keys(), key=lambda x: freq_cipher[x], reverse=True)
-            urut_inggris = sorted(frekuensi_inggris.keys(), key=lambda x: frekuensi_inggris[x], reverse=True)
-            update_mapping(dict(zip(urut_cipher, urut_inggris)))
+        if st.button("Bongkar Otomatis Cerdas"):
+            map_baru, skor = auto_solve_cerdas(ciphertext)
+            if skor > 0:
+                update_mapping(map_baru)
+                st.success("Teks berhasil dibongkar sempurna!")
+            else:
+                urut_cipher = sorted(freq_cipher.keys(), key=lambda x: freq_cipher[x], reverse=True)
+                urut_inggris = sorted(frekuensi_inggris.keys(), key=lambda x: frekuensi_inggris[x], reverse=True)
+                update_mapping(dict(zip(urut_cipher, urut_inggris)))
+                st.warning("Teks tidak standar, menggunakan pemetaan probabilitas mentah.")
             st.rerun()
 
     if urutkan == "A - Z":

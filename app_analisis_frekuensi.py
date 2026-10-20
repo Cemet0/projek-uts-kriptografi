@@ -4,6 +4,9 @@ from collections import Counter
 import string
 import random
 import math
+from itertools import permutations
+from functools import lru_cache
+import time
 
 st.set_page_config(
     page_title="Kriptanalisis Otomatis - Analisis Frekuensi",
@@ -262,49 +265,411 @@ def auto_solve_simulated_annealing(ciphertext, bahasa="Indonesia", restarts=5, s
 
     return best_overall_map, best_overall_score
 
+# ==========================================
+# 3b. ALGORITMA LAIN DI PDF: HOMOFONIK, RAIL FENCE, COLUMNAR TRANSPOSITION
+# ==========================================
+
+# Korpus kecil untuk model bahasa (bigram + trigram log-probabilitas)
+KORPUS_LM = {
+    "English": 'Cryptography is the art and science of keeping messages secret. Long before computers existed, people used pencil and paper to hide the meaning of their letters. The best known of these old methods is the cipher attributed to Julius Caesar, in which every letter of the alphabet is moved three places forward. A message written in this way looks like nonsense, yet anyone who knows the rule can read it at once. Such simple systems are easy to break because the language that people speak has a very uneven pattern of letters. In English the letter e appears more often than any other, followed by t and a, while the letters q and z are rare. When a message is changed by replacing each letter with another, these habits of the language are not removed but only disguised. An attacker who counts the letters in the secret text will soon notice that one symbol appears again and again, and it is reasonable to guess that this symbol stands for the letter e. By looking at common pairs and short words such as the, and, and of, the attacker can slowly recover the whole table. This method, called frequency analysis, was first described by scholars in the ancient world and it remained the main weapon of those who wanted to read the secrets of other people for many centuries. Designers of later ciphers tried to defeat it by using several alphabets at once, by replacing groups of letters instead of single ones, or by letting a common letter be written in many different ways. Another family of methods leaves the letters unchanged and only moves them to new positions, so that the counts of letters stay the same but the order of the words is lost.',
+    "Indonesia": 'Kriptografi adalah ilmu dan seni untuk menjaga kerahasiaan pesan. Jauh sebelum komputer ada, orang hanya menggunakan pena dan kertas untuk menyembunyikan makna dari surat yang mereka kirim. Salah satu metode lama yang paling terkenal adalah sandi yang dipakai pada zaman Julius Caesar, yaitu setiap huruf dalam alfabet digeser tiga tempat ke kanan. Pesan yang ditulis dengan cara ini tampak seperti kumpulan huruf yang tidak berarti, tetapi siapa pun yang mengetahui aturannya dapat membacanya dengan mudah. Sistem sederhana seperti ini mudah dipecahkan karena bahasa yang digunakan manusia memiliki pola huruf yang tidak merata. Dalam bahasa Indonesia huruf a muncul paling sering, disusul oleh huruf n, i, dan e, sedangkan huruf q, x, dan v hampir tidak pernah dipakai. Ketika sebuah pesan diubah dengan mengganti setiap huruf dengan huruf lain, kebiasaan bahasa tersebut tidak hilang, hanya disamarkan. Seorang penyerang yang menghitung jumlah huruf pada cipherteks akan segera menyadari bahwa ada satu simbol yang muncul berulang kali, dan wajar jika ia menduga simbol itu mewakili huruf a. Dengan memperhatikan pasangan huruf yang umum serta kata pendek seperti yang, dan, di, dan ke, penyerang dapat memulihkan seluruh tabel substitusi secara perlahan. Teknik ini disebut analisis frekuensi, dan selama berabad abad teknik ini menjadi senjata utama bagi mereka yang ingin membaca rahasia orang lain. Perancang sandi yang datang kemudian mencoba mengalahkannya dengan memakai beberapa alfabet sekaligus, dengan mengganti sekelompok huruf sekaligus, atau dengan membiarkan satu huruf yang sering muncul ditulis dalam banyak bentuk. Ada pula keluarga metode lain yang tidak mengubah huruf sama sekali, melainkan hanya memindahkan posisinya, sehingga jumlah setiap huruf tetap sama tetapi urutan kata menjadi hilang.',
+}
+
+# Tabel homofonik dari PDF (huruf plainteks -> pilihan unit cipherteks 2 huruf)
+HOMO_RAW = 'A BU CP AV AH BT BS CQ\nB AT\nC DL BK AU\nD BV DY DM AI\nE DK CO AW BL AA CR BM CS AF AG BO BN BE\nF BW CM CN\nG DN BJ\nH AS CL CK\nI DJ BI AX CJ AB BP CU CT\nJ BX\nK DI\nL AR BH CI AJ\nM DH BG AY\nN BY DG DF CH AC BR DU DT\nO DZ BF DX AK CG BQ DR\nP BZ DE AZ\nQ DD\nR AQ DC DQ AL CE CF CV DS\nS AP AN AO CD DW DV\nT CB DB DP CC AD CY CW CX AE\nU CA AM BA\nV BB\nW CZ\nX BD\nY DO DA\nZ BC'
+HOMO_INV = {u: ln.split()[0] for ln in HOMO_RAW.splitlines() for u in ln.split()[1:]}
+
+LN_26_FAKTORIAL = math.lgamma(27)  # ukuran ruang kunci substitusi acak (26!)
+
+
+@lru_cache(maxsize=None)
+def bangun_lm(bahasa):
+    """Model bigram & trigram (add-k smoothing) dari korpus bahasa."""
+    A_ = string.ascii_uppercase
+    t = "".join(c for c in KORPUS_LM[bahasa].upper() if c in A_)
+    k = 0.05
+    c2 = Counter(t[i:i + 2] for i in range(len(t) - 1))
+    c3 = Counter(t[i:i + 3] for i in range(len(t) - 2))
+    n2, n3 = sum(c2.values()), sum(c3.values())
+    bi = [[math.log((c2[x + y] + k) / (n2 + k * 676)) for y in A_] for x in A_]
+    tri = [math.log((c3[x + y + z] + k) / (n3 + k * 17576)) for x in A_ for y in A_ for z in A_]
+    return bi, tri
+
+
+def skor_lm(teks, bahasa):
+    """Total log-likelihood teks terhadap bahasa + jumlah huruf."""
+    bi, tri = bangun_lm(bahasa)
+    L = [ord(c) - 65 for c in teks.upper() if c in string.ascii_uppercase]
+    s = sum(bi[a][b] for a, b in zip(L, L[1:]))
+    s += 0.5 * sum(tri[(a * 26 + b) * 26 + c] for a, b, c in zip(L, L[1:], L[2:]))
+    return s, len(L)
+
+
+def coba_homofonik(ciphertext):
+    """Cipherteks homofonik = deretan unit 2 huruf yang SEMUA ada di tabel homofon PDF."""
+    s = "".join(ciphertext.upper().split())
+    if len(s) < 8 or len(s) % 2 or not (s.isascii() and s.isalpha()):
+        return None
+    unit = [s[i:i + 2] for i in range(0, len(s), 2)]
+    if all(u in HOMO_INV for u in unit):
+        return "".join(HOMO_INV[u] for u in unit)
+    return None
+
+
+def rail_pola(n_char, rel):
+    baris, r, d = [[] for _ in range(rel)], 0, 1
+    for i in range(n_char):
+        baris[r].append(i)
+        d = 1 if r == 0 else (-1 if r == rel - 1 else d)
+        r += d
+    return [i for row in baris for i in row]
+
+
+def rail_dekripsi(t, rel):
+    hasil = [""] * len(t)
+    for ch, i in zip(t, rail_pola(len(t), rel)):
+        hasil[i] = ch
+    return "".join(hasil)
+
+
+def kandidat_caesar(ciphertext, bahasa):
+    """Exhaustive key search 26 kunci, dinilai dengan model bahasa (bigram + trigram)."""
+    terbaik = None
+    for geser in range(26):
+        peta = {string.ascii_uppercase[i]: string.ascii_uppercase[(i + geser) % 26] for i in range(26)}
+        plain = substitusi_teks(ciphertext, peta)
+        ll, n = skor_lm(plain, bahasa)
+        if terbaik is None or ll > terbaik[0]:
+            terbaik = (ll, n, peta, (26 - geser) % 26)
+    ll, n, peta, k = terbaik
+    metode = "Plainteks (tidak terenkripsi)" if k == 0 else f"Caesar Cipher (Geser K = {k})" + (" - ROT13" if k == 13 else "")
+    return {"mdl": ll - math.log(26), "ll": ll, "n": n, "map": peta, "metode": metode, "bahasa": bahasa}
+
+
+def kandidat_rail(t, bahasa):
+    terbaik = None
+    for rel in range(2, min(11, len(t))):
+        plain = rail_dekripsi(t, rel)
+        ll, n = skor_lm(plain, bahasa)
+        if terbaik is None or ll > terbaik[0]:
+            terbaik = (ll, n, plain, rel)
+    if terbaik is None:
+        return None
+    ll, n, plain, rel = terbaik
+    return {"mdl": ll - math.log(9), "ll": ll, "n": n, "plainteks": plain,
+            "metode": f"Rail Fence Cipher ({rel} baris)", "bahasa": bahasa}
+
+
+def kandidat_kolom(t, bahasa):
+    """
+    Columnar Transposition versi PDF: kolom tabel diatur ulang menurut kunci lalu dibaca baris demi baris.
+    Urutan kolom dicari dengan skor bigram antar-kolom bertetangga (tanda '.' = padding).
+    """
+    bi, _ = bangun_lm(bahasa)
+    huruf = lambda x: x.isascii() and x.isalpha()
+    terbaik = None
+    for n in range(2, 10):
+        if len(t) % n or len(t) // n < 2:
+            continue
+        R = len(t) // n
+        grid = [t[r * n:(r + 1) * n] for r in range(R)]
+
+        def b(x, y):
+            return bi[ord(x) - 65][ord(y) - 65] if huruf(x) and huruf(y) else 0.0
+
+        S = [[sum(b(grid[r][i], grid[r][j]) for r in range(R)) for j in range(n)] for i in range(n)]
+        W = [[sum(b(grid[r][i], grid[r + 1][j]) for r in range(R - 1)) for j in range(n)] for i in range(n)]
+        skor_o = []
+        for o in permutations(range(n)):
+            skor_o.append((sum(S[o[i]][o[i + 1]] for i in range(n - 1)) + W[o[-1]][o[0]], o))
+        skor_o.sort(reverse=True)
+        plain, kunci, ll, jml = None, None, None, None
+        for _, o in skor_o[:40]:  # nilai ulang kandidat teratas dengan bigram + trigram
+            p_ = "".join(grid[r][o[c]] for r in range(R) for c in range(n)).rstrip(".")
+            l_, j_ = skor_lm(p_, bahasa)
+            if ll is None or l_ > ll:
+                plain, ll, jml = p_, l_, j_
+                kunci = [0] * n
+                for c, j in enumerate(o):
+                    kunci[j] = c + 1
+        mdl = ll - math.lgamma(n + 1) - math.log(8)
+        if terbaik is None or mdl > terbaik["mdl"]:
+            terbaik = {"mdl": mdl, "ll": ll, "n": jml, "plainteks": plain, "bahasa": bahasa,
+                       "metode": f"Columnar Transposition (kunci {','.join(map(str, kunci))})"}
+    return terbaik
+
+
+# ----- Cipher tambahan di luar PDF: Atbash/Affine, Vigenere, Reverse, Scytale, Playfair -----
+ABJAD = string.ascii_uppercase
+ALF25 = "ABCDEFGHIKLMNOPQRSTUVWXYZ"  # Playfair: I/J digabung
+
+
+def ll_idx(idx, bahasa):
+    """Log-likelihood bigram + trigram dari daftar indeks huruf (0-25)."""
+    bi, tri = bangun_lm(bahasa)
+    s_ = sum(bi[a][b] for a, b in zip(idx, idx[1:]))
+    return s_ + 0.5 * sum(tri[(a * 26 + b) * 26 + c] for a, b, c in zip(idx, idx[1:], idx[2:]))
+
+
+def indeks_huruf(teks):
+    return [ord(c) - 65 for c in teks.upper() if c in ABJAD]
+
+
+def kandidat_affine(ciphertext, bahasa):
+    """Affine c = (a*p + b) mod 26 (312 kunci). a=25,b=25 adalah Atbash."""
+    L = indeks_huruf(ciphertext)
+    terbaik = None
+    for a in (3, 5, 7, 9, 11, 15, 17, 19, 21, 23, 25):
+        a_inv = pow(a, -1, 26)
+        for b in range(26):
+            ll = ll_idx([(a_inv * (x - b)) % 26 for x in L], bahasa)
+            if terbaik is None or ll > terbaik[0]:
+                terbaik = (ll, a, b, a_inv)
+    ll, a, b, a_inv = terbaik
+    peta = {ABJAD[x]: ABJAD[(a_inv * (x - b)) % 26] for x in range(26)}
+    nama = "Atbash Cipher" if (a, b) == (25, 25) else f"Affine Cipher (a = {a}, b = {b})"
+    return {"mdl": ll - math.log(312), "ll": ll, "n": len(L), "map": peta, "metode": nama, "bahasa": bahasa}
+
+
+def dekripsi_vigenere(teks, kunci):
+    hasil, i = [], 0
+    for ch in teks.upper():
+        if ch in ABJAD:
+            hasil.append(ABJAD[(ord(ch) - 65 - kunci[i % len(kunci)]) % 26])
+            i += 1
+        else:
+            hasil.append(ch)
+    return "".join(hasil)
+
+
+def kandidat_vigenere(ciphertext, bahasa):
+    """Cari panjang kunci lewat Index of Coincidence kolom, lalu tiap kolom dipecahkan seperti Caesar."""
+    L = indeks_huruf(ciphertext)
+    n = len(L)
+    maks_m = min(12, n // 6)
+    if maks_m < 2:
+        return None
+    ref = FREKUENSI_STANDAR[bahasa]
+    refp = [ref[c] / 100 for c in ABJAD]
+
+    def ic_kolom(m):
+        tot = 0.0
+        for j in range(m):
+            col = L[j::m]
+            nn = len(col)
+            tot += sum(v * (v - 1) for v in Counter(col).values()) / (nn * (nn - 1)) if nn > 1 else 0
+        return tot / m
+
+    terbaik = None
+    for m in sorted(range(2, maks_m + 1), key=lambda m: -ic_kolom(m))[:4]:
+        kunci = []
+        for j in range(m):
+            col = L[j::m]
+            cnt, nn = Counter(col), len(col)
+            kunci.append(min(range(26), key=lambda sft: sum(
+                (cnt.get((d + sft) % 26, 0) - refp[d] * nn) ** 2 / max(refp[d] * nn, 0.05) for d in range(26))))
+        dek = lambda k: [(x - k[i % len(k)]) % 26 for i, x in enumerate(L)]
+        ll = ll_idx(dek(kunci), bahasa)
+        for _ in range(2):  # perbaiki tiap huruf kunci dengan model bigram/trigram
+            berubah = False
+            for j in range(m):
+                for sft in range(26):
+                    if sft == kunci[j]:
+                        continue
+                    k2 = kunci[:]
+                    k2[j] = sft
+                    l2 = ll_idx(dek(k2), bahasa)
+                    if l2 > ll + 1e-9:
+                        ll, kunci, berubah = l2, k2, True
+            if not berubah:
+                break
+        mdl = ll - m * math.log(26)
+        if terbaik is None or mdl > terbaik["mdl"]:
+            terbaik = {"mdl": mdl, "ll": ll, "n": n, "m": m, "bahasa": bahasa,
+                       "plainteks": dekripsi_vigenere(ciphertext, kunci),
+                       "metode": f"Vigenere Cipher (kunci {''.join(ABJAD[k] for k in kunci)})"}
+    return terbaik
+
+
+def kandidat_reverse(ciphertext, bahasa):
+    varian = {"Teks Dibalik (Reverse)": ciphertext[::-1],
+              "Setiap Kata Dibalik": " ".join(w[::-1] for w in ciphertext.split(" "))}
+    terbaik = None
+    for nama, plain in varian.items():
+        ll, n = skor_lm(plain, bahasa)
+        if terbaik is None or ll > terbaik["ll"]:
+            terbaik = {"mdl": ll - math.log(3), "ll": ll, "n": n, "plainteks": plain, "metode": nama, "bahasa": bahasa}
+    return terbaik
+
+
+def scytale_dekripsi(t, n):
+    R = -(-len(t) // n)
+    penuh = len(t) - (R - 1) * n
+    panjang = [R if j < penuh else R - 1 for j in range(n)]
+    kolom, pos = [], 0
+    for pj in panjang:
+        kolom.append(t[pos:pos + pj])
+        pos += pj
+    return "".join(kolom[j][r] for r in range(R) for j in range(n) if r < len(kolom[j]))
+
+
+def kandidat_scytale(t, bahasa):
+    terbaik = None
+    for n in range(2, min(21, len(t) // 2 + 1)):
+        plain = scytale_dekripsi(t, n)
+        ll, jml = skor_lm(plain, bahasa)
+        if terbaik is None or ll > terbaik["ll"]:
+            terbaik = {"mdl": ll - math.log(19), "ll": ll, "n": jml, "plainteks": plain,
+                       "metode": f"Scytale / Transposisi Kolom Sederhana (diameter {n})", "bahasa": bahasa}
+    return terbaik
+
+
+def tampak_playfair(ciphertext):
+    """Ciri Playfair: panjang genap, tanpa J, dan tidak ada pasangan huruf kembar (mis. 'XX') pada digram."""
+    s_ = "".join(c for c in ciphertext.upper() if c in ABJAD)
+    if len(s_) < 120 or len(s_) % 2 or "J" in s_:
+        return None
+    if any(s_[i] == s_[i + 1] for i in range(0, len(s_), 2)):
+        return None
+    return s_
+
+
+def playfair_pecahkan(s_, bahasa, restart=3, iterasi=15000):
+    """Simulated annealing pada tabel kunci 5x5; skor = model bahasa teks hasil dekripsi."""
+    pasangan = [(ALF25.index(s_[i]), ALF25.index(s_[i + 1])) for i in range(0, len(s_), 2)]
+    peta26 = [ord(c) - 65 for c in ALF25]
+
+    def dekripsi(sq):
+        pos = [0] * 25
+        for i, v in enumerate(sq):
+            pos[v] = i
+        out = []
+        for a, b in pasangan:
+            ia, ib = pos[a], pos[b]
+            ra, ca, rb, cb = ia // 5, ia % 5, ib // 5, ib % 5
+            if ra == rb:
+                out += [peta26[sq[ra * 5 + (ca - 1) % 5]], peta26[sq[rb * 5 + (cb - 1) % 5]]]
+            elif ca == cb:
+                out += [peta26[sq[((ra - 1) % 5) * 5 + ca]], peta26[sq[((rb - 1) % 5) * 5 + cb]]]
+            else:
+                out += [peta26[sq[ra * 5 + cb]], peta26[sq[rb * 5 + ca]]]
+        return out
+
+    rng = random.Random(7)
+    terbaik = None
+    for _ in range(restart):
+        sq = list(range(25))
+        rng.shuffle(sq)
+        cur = ll_idx(dekripsi(sq), bahasa)
+        for it in range(iterasi):
+            T = 25.0 * (1 - it / iterasi) + 0.3
+            k2, r = sq[:], rng.random()
+            if r < 0.9:
+                i, j = rng.sample(range(25), 2)
+                k2[i], k2[j] = k2[j], k2[i]
+            elif r < 0.95:
+                i, j = rng.sample(range(5), 2)
+                for c in range(5):
+                    k2[i * 5 + c], k2[j * 5 + c] = k2[j * 5 + c], k2[i * 5 + c]
+            else:
+                i, j = rng.sample(range(5), 2)
+                for rr in range(5):
+                    k2[rr * 5 + i], k2[rr * 5 + j] = k2[rr * 5 + j], k2[rr * 5 + i]
+            sc = ll_idx(dekripsi(k2), bahasa)
+            if sc > cur or math.exp((sc - cur) / T) > rng.random():
+                sq, cur = k2, sc
+                if terbaik is None or cur > terbaik[0]:
+                    terbaik = (cur, sq[:])
+    ll, sq = terbaik
+    plain = "".join(ABJAD[x] for x in dekripsi(sq))
+    return {"mdl": ll - math.lgamma(26), "ll": ll, "n": len(plain), "plainteks": plain,
+            "metode": "Playfair Cipher (tabel 5x5, AI Simulated Annealing)", "bahasa": bahasa}
+
+
 def auto_solve_semua(ciphertext, opsi_bahasa="Otomatis (Deteksi)"):
     """
-    Menjalankan pemecahan otomatis secara menyeluruh:
-    1. Cek opsi bahasa (Deteksi otomatis atau bahasa yang dipilih)
-    2. Cek apakah ini Caesar Cipher (pada semua bahasa kandidat)
-    3. Jika substitusi acak, jalankan AI Simulated Annealing pada bahasa kandidat dan pilih skor tertinggi
+    Pipeline pemecahan otomatis. Semua kandidat dibandingkan dengan skor model bahasa
+    dikurangi ln(jumlah kunci) (prinsip MDL), supaya metode berkunci besar tidak menang
+    hanya karena lebih "fleksibel" menyesuaikan teks pendek.
+      Dari PDF   : Homofonik, Caesar/ROT13, Rail Fence, Columnar, Substitusi (tabel acak/kata kunci)
+      Tambahan   : Atbash/Affine, Vigenere, Reverse, Scytale, Playfair
     """
     if len(ciphertext.strip()) < 5:
         return None
 
     daftar_bahasa = ["Indonesia", "English"] if opsi_bahasa == "Otomatis (Deteksi)" else [opsi_bahasa]
+    identitas = {c: c for c in string.ascii_uppercase}
 
-    # 1. Uji Caesar Cipher terlebih dahulu (< 5ms)
-    tokens = "".join([c if c.isalpha() or c.isspace() else " " for c in ciphertext.upper()]).split()
-    total_kata = len(tokens)
+    # 1. Homofonik (tabel dari PDF, deterministik)
+    plain_h = coba_homofonik(ciphertext)
+    if plain_h:
+        b = max(daftar_bahasa, key=lambda x: skor_lm(plain_h, x)[0])
+        ll, n = skor_lm(plain_h, b)
+        return {"map": identitas, "plainteks": plain_h, "metode": "Cipher Homofonik (tabel homofon PDF)",
+                "bahasa": b, "skor": ll, "status": "Sukses"}
+
+    # 2. Kandidat murah: Caesar, Rail Fence, Columnar, Affine/Atbash, Vigenere, Reverse, Scytale
+    t = "".join(ciphertext.upper().split())
+    n_huruf = len(indeks_huruf(ciphertext))
+    kandidat = []
+    for b in daftar_bahasa:
+        kandidat.append(kandidat_caesar(ciphertext, b))
+        if n_huruf >= 12:  # 312 kunci Affine terlalu longgar untuk teks sangat pendek
+            kandidat.append(kandidat_affine(ciphertext, b))
+        kandidat.append(kandidat_reverse(ciphertext, b))
+        fungsi_t = [kandidat_rail, kandidat_kolom, kandidat_scytale]
+        for fungsi in fungsi_t:
+            k = fungsi(t, b)
+            if k:
+                kandidat.append(k)
+        # Vigenere meratakan frekuensi huruf (IC rendah); pada teks pendek IC tidak bisa dipercaya
+        if n_huruf < 60 or index_of_coincidence_idx(indeks_huruf(ciphertext)) < 0.058:
+            k = kandidat_vigenere(ciphertext, b)
+            if k:
+                kandidat.append(k)
+
+    def ambang(n):
+        # Teks panjang yang benar-benar terbongkar punya skor rata-rata per huruf > -9,8;
+        # teks pendek lebih longgar karena statistiknya kurang stabil.
+        return -9.8 if n >= 150 else -10.5
+
+    def selesai(k):
+        k = dict(k)
+        k.setdefault("map", identitas)
+        k["skor"] = k["ll"]
+        yakin = k["n"] >= 8 and k["ll"] / k["n"] > ambang(k["n"])
+        if k["metode"].startswith("Substitusi") and k["n"] < 150:
+            yakin = False  # substitusi acak pada teks pendek hanya tebakan
+        if k["metode"].startswith("Vigenere") and k["n"] < 15 * k.get("m", 1):
+            yakin = False  # kolom terlalu pendek untuk analisis frekuensi
+        k["status"] = "Sukses" if yakin else "Tebakan"
+        return k
+
+    terbaik = max(kandidat, key=lambda k: k["mdl"])
+    if selesai(terbaik)["status"] == "Sukses":
+        return selesai(terbaik)
+
+    # 3. Playfair (dikenali dari cirinya) dan substitusi umum -> Simulated Annealing
+    pf = tampak_playfair(ciphertext)
+    if pf:
+        for b in daftar_bahasa:
+            kandidat.append(playfair_pecahkan(pf, b))
+        terbaik = max(kandidat, key=lambda k: k["mdl"])
+        if selesai(terbaik)["status"] == "Sukses":
+            return selesai(terbaik)
 
     for b in daftar_bahasa:
-        map_caesar, skor_caesar, shift = auto_solve_caesar(ciphertext, b)
-        plain_caesar = substitusi_teks(ciphertext, map_caesar).upper()
-        kata_valid = sum(1 for w in plain_caesar.split() if ''.join([c for c in w if c.isalpha()]) in KAMUS_KATA[b])
-        if kata_valid >= max(2, total_kata * 0.25):
-            return {
-                "map": map_caesar,
-                "metode": f"Caesar Cipher (Geser K = {shift})",
-                "bahasa": b,
-                "skor": skor_caesar,
-                "status": "Sukses"
-            }
+        map_sa, _ = auto_solve_simulated_annealing(ciphertext, b)
+        ll, n = skor_lm(substitusi_teks(ciphertext, map_sa), b)
+        kandidat.append({"mdl": ll - LN_26_FAKTORIAL, "ll": ll, "n": n, "map": map_sa,
+                         "metode": "Substitusi Acak (AI Simulated Annealing)", "bahasa": b})
+    return selesai(max(kandidat, key=lambda k: k["mdl"]))
 
-    # 2. Monoalphabetic Substitution Acak -> Jalankan Simulated Annealing pada setiap bahasa kandidat
-    hasil_sa = []
-    for b in daftar_bahasa:
-        map_sa, skor_sa = auto_solve_simulated_annealing(ciphertext, b)
-        hasil_sa.append({
-            "map": map_sa,
-            "metode": "Substitusi Acak (AI Simulated Annealing)",
-            "bahasa": b,
-            "skor": skor_sa,
-            "status": "Sukses"
-        })
 
-    hasil_sa.sort(key=lambda x: x["skor"], reverse=True)
-    return hasil_sa[0]
+def index_of_coincidence_idx(L):
+    n = len(L)
+    return sum(v * (v - 1) for v in Counter(L).values()) / (n * (n - 1)) if n > 1 else 0.0
+
 
 # ==========================================
 # 4. TAMPILAN ANTARMUKA PENGGUNA (UI)
@@ -320,7 +685,7 @@ st.divider()
 baris_opsi = st.columns([1.5, 1.2])
 with baris_opsi[0]:
     opsi_bahasa = st.selectbox(
-        "🌐 Basis Bahasa Teks:",
+        "Basis Bahasa Teks:",
         ["Otomatis (Deteksi)", "Indonesia", "English"],
         help="Pilih bahasa acuan frekuensi huruf dan kamus kata, atau biarkan sistem mendeteksi secara otomatis."
     )
@@ -334,7 +699,7 @@ with baris_opsi[1]:
 kolom_kiri, kolom_kanan = st.columns([1.1, 1.9], gap="large")
 
 with kolom_kiri:
-    st.subheader("📥 Input Cipherteks")
+    st.subheader("Input Cipherteks")
     ciphertext = st.text_area(
         "Masukkan atau tempel cipherteks di sini:",
         value="",
@@ -351,7 +716,7 @@ with kolom_kiri:
     
     if teks_berubah or tombol_ulang:
         if len(ciphertext.strip()) >= 5:
-            with st.spinner("🤖 AI sedang menganalisis frekuensi dan memetakan huruf secara otomatis..."):
+            with st.spinner("I sedang menganalisis frekuensi dan memetakan huruf secara otomatis..."):
                 hasil = auto_solve_semua(ciphertext, opsi_bahasa)
                 if hasil:
                     update_mapping(hasil["map"])
@@ -363,15 +728,26 @@ with kolom_kiri:
     # Tampilkan Kartu Informasi Hasil Auto-Solve
     if st.session_state.solve_info and total_huruf > 0:
         info = st.session_state.solve_info
-        st.success(
-            f"✅ **Teks Berhasil Disesuaikan Otomatis!**\n\n"
-            f"- **Metode Terdeteksi:** {info['metode']}\n"
-            f"- **Bahasa Acuan:** {info['bahasa']}\n"
-            f"- **Status Penyesuaian:** Sempurna (Tanpa perlu penyesuaian manual)"
-        )
+        if info["status"] == "Sukses":
+            st.success(
+                f"✅ **Teks Berhasil Dibongkar Otomatis!**\n\n"
+                f"- **Metode Terdeteksi:** {info['metode']}\n"
+                f"- **Bahasa Acuan:** {info['bahasa']}"
+            )
+        else:
+            st.warning(
+                f"⚠️ **Ini baru tebakan terbaik** (teks terlalu pendek atau tidak cukup pola statistik).\n\n"
+                f"- **Metode Terdeteksi:** {info['metode']}\n"
+                f"- **Bahasa Acuan:** {info['bahasa']}\n"
+                f"- Periksa hasilnya; untuk substitusi, koreksi huruf lewat Penyesuaian Manual atau gunakan cipherteks lebih panjang."
+            )
 
-    st.subheader("📤 Hasil Dekripsi Otomatis")
-    hasil_dekripsi = substitusi_teks(ciphertext, st.session_state.mapping)
+    st.subheader("Hasil Dekripsi Otomatis")
+    info_aktif = st.session_state.solve_info
+    if info_aktif and "plainteks" in info_aktif and ciphertext == st.session_state.last_solved_text:
+        hasil_dekripsi = info_aktif["plainteks"]  # transposisi / homofonik: bukan pemetaan huruf
+    else:
+        hasil_dekripsi = substitusi_teks(ciphertext, st.session_state.mapping)
     st.text_area(
         "Plainteks (Hasil Dekripsi):",
         value=hasil_dekripsi,
@@ -437,7 +813,7 @@ with kolom_kanan:
     st.plotly_chart(fig, use_container_width=True)
 
     # Penyesuaian Manual (ditaruh dalam expander opsional agar tidak membebani pengguna)
-    with st.expander("🛠️ Penyesuaian Manual (Opsional - Jika ingin melihat atau mengubah huruf tertentu)"):
+    with st.expander("Penyesuaian Manual (Opsional - Jika ingin melihat atau mengubah huruf tertentu)"):
         st.caption("Huruf di bawah ini telah disesuaikan secara otomatis oleh sistem AI. Anda hanya perlu menyentuhnya jika ingin bereksperimen mengubah huruf secara spesifik.")
         if st.button("Reset ke A-Z"):
             update_mapping({ch: ch for ch in string.ascii_uppercase})
